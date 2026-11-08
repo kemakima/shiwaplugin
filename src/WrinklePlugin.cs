@@ -12,8 +12,9 @@ using KKAPI.Studio;
 namespace ClothWrinkle
 {
     /// <summary>
-    /// 体を曲げたときに服 (レオタードなど) が縮んだ所・引っ張られた所へ、しわの法線マップを足すプラグイン。
-    /// 今のポーズのメッシュと元の形を三角形ごとに比べ、縮み方向と直角にしわを描く。
+    /// 体を曲げたときに服 (レオタードなど) が縮んだ所へ、横じわを足すプラグイン。
+    /// 今のポーズのメッシュと元の形を三角形ごとに比べ、体の軸方向に縮んだ所ほど濃く、
+    /// 法線マップ (陰影) と、KK 系シェーダーの描き込みマスク (アニメ調の線・影) にしわを描く。
     /// </summary>
     [BepInPlugin(GUID, PluginName, Version)]
     [BepInDependency(KoikatuAPI.GUID, "1.30")]
@@ -21,7 +22,7 @@ namespace ClothWrinkle
     {
         public const string GUID = "zuki.kks.clothwrinkle";
         public const string PluginName = "ClothWrinkle (服のしわ)";
-        public const string Version = "0.4.1";
+        public const string Version = "0.5.0";
 
         internal static ManualLogSource Log;
 
@@ -30,6 +31,7 @@ namespace ClothWrinkle
         internal static ConfigEntry<bool> DebugLog;
         internal static ConfigEntry<float> MaxRate;
         internal static ConfigEntry<bool> DumpDebug;
+        internal static ConfigEntry<bool> MeshDraw;
 
         private static string _logPath;
 
@@ -60,6 +62,9 @@ namespace ClothWrinkle
             MaxRate = Config.Bind("Update", "Max updates per second", 30f,
                 new ConfigDescription("リアルタイム更新で、1秒間にしわの濃さを計算し直す最大回数。下げるほど軽い。",
                     new AcceptableValueRange<float>(1f, 60f)));
+
+            MeshDraw = Config.Bind("Update", "Fast mesh drawing", true,
+                "しわの合成をメッシュ一括で描く (速い)。起動後最初の描画で動くか自動で確かめ、だめなら従来の GL 描画に切り替える。オフにすると常に GL 描画。");
 
             DumpDebug = Config.Bind("Debug", "Dump debug textures", false,
                 "オンにすると、次の更新で法線マップ (元/しわ最大/結果) を UserData\\ClothWrinkle_debug に PNG で保存し、自動でオフに戻る。");

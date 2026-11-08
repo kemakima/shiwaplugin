@@ -32,6 +32,15 @@ namespace ClothWrinkle
             cat.AddControl(new CurrentStateCategorySlider("折り目の鋭さ", c => Get(c)?.Settings.Sharpness ?? 0.5f, 0f, 1f))
                 .Value.Subscribe(v => Each(s => s.Sharpness = v));
 
+            cat.AddControl(new CurrentStateCategorySlider("深い曲げで増えるしわ", c => Get(c)?.Settings.DeepFolds ?? 0.6f, 0f, 1f))
+                .Value.Subscribe(v => Each(s => s.DeepFolds = v));
+
+            cat.AddControl(new CurrentStateCategorySlider("しわの線 (アニメ調)", c => Get(c)?.Settings.ToonLine ?? 0.6f, 0f, 1f))
+                .Value.Subscribe(v => Each(s => s.ToonLine = v));
+
+            cat.AddControl(new CurrentStateCategorySlider("しわの影 (アニメ調)", c => Get(c)?.Settings.ToonShadow ?? 0.6f, 0f, 1f))
+                .Value.Subscribe(v => Each(s => s.ToonShadow = v));
+
             cat.AddControl(new CurrentStateCategorySlider("しわ模様", c => Get(c)?.Settings.Seed ?? 0, 0f, 100f))
                 .Value.Subscribe(v => Each(s => s.Seed = Mathf.RoundToInt(v)));
 
