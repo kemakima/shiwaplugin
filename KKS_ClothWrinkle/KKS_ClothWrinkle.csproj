@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    KKS_ClothWrinkle : Koikatsu Sunshine CharaStudio 用 服のしわプラグイン
+    ビルド:  dotnet build -c Release -p:GamePath="D:\KoikatsuSunshine"
+    GamePath はゲーム本体 (KoikatsuSunshine.exe がある所) を指定してください。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net46</TargetFramework>
+    <AssemblyName>KKS_ClothWrinkle</AssemblyName>
+    <RootNamespace>ClothWrinkle</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <DebugType>embedded</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>..\bin\</OutputPath>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <GamePath Condition="'$(GamePath)' == ''">D:\KoikatsuSunshine</GamePath>
+    <GameManaged>$(GamePath)\CharaStudio_Data\Managed</GameManaged>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\**\*.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net46" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- ゲームと BepInEx / KKSAPI の DLL を直接参照する (出力にはコピーしない) -->
+  <ItemGroup>
+    <Reference Include="$(GameManaged)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="$(GameManaged)\Assembly-CSharp-firstpass.dll" Private="false" />
+    <Reference Include="$(GameManaged)\UnityEngine*.dll" Private="false" />
+    <Reference Include="$(GameManaged)\UniRx*.dll" Private="false" />
+    <Reference Include="$(GamePath)\BepInEx\core\BepInEx.dll" Private="false" />
+    <Reference Include="$(GamePath)\BepInEx\plugins\**\KKSAPI.dll" Private="false" />
+    <Reference Include="$(GamePath)\BepInEx\plugins\**\*ExtensibleSaveFormat.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CheckGamePath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(GameManaged)\Assembly-CSharp.dll')"
+           Text="ゲームが見つかりません: $(GamePath)  -p:GamePath=&quot;ゲームのフォルダ&quot; を指定してください。" />
+  </Target>
+
+</Project>

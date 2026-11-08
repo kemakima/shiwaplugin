@@ -1,0 +1,5 @@
+# ビルド成果物 (DLL は GitHub の Releases で配布する)
+bin/
+obj/
+*.user
+.vs/
