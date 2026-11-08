@@ -290,24 +290,231 @@ namespace ClothWrinkle
             }
         }
 
-        // ---------------- GPU 合成 ----------------
-
-        private static Material _mat;
+        // ---------------- UV 展開メッシュ ----------------
 
         /// <summary>
-        /// out = base の上に、full を頂点の濃さ (アルファ) で重ねる (RGB のみ)。
-        /// GL の即時描画で三角形を UV の位置に描く (DirtFX で動作実績のある方法)。濃さ 0 の三角形は描かない。
+        /// 服のメッシュを UV の位置に広げたメッシュを作る (三角形ごとに独立した頂点)。
+        /// UV の島の外周 (継ぎ目・服の端) には、外側へ padPx ピクセル分の「すそ」を付ける。
+        /// 境目のテクセルが半分しか塗られずに、しわが途切れた細い線に見えるのを防ぐため。
         /// </summary>
-        public static int Draw(RenderTexture dst, Texture baseTex, Texture fullTex, List<MeshPart> parts)
+        public static void BuildUvMesh(MeshPart p, int w, int h, float padPx)
         {
-            if (_mat == null)
+            var uv = p.Uv; var tris = p.Tris;
+            int nt = tris.Length / 3;
+            if (uv == null || uv.Length != p.Rest.Length) { p.UvVerts = null; return; }
+
+            // 三角形ごとの UV (0..1 の範囲へずらす)
+            var tv = new Vector2[nt * 3];
+            for (int t = 0; t < nt; t++)
             {
-                var shader = Shader.Find("UI/Default");
-                if (shader == null) { WrinklePlugin.Log.LogError("UI/Default シェーダーが見つかりません"); return 0; }
-                _mat = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
-                _mat.SetFloat("_ColorMask", 14f); // RGB のみ (A は 1 のまま)
-                _mat.color = Color.white;
+                Vector2 a = uv[tris[t * 3]], b = uv[tris[t * 3 + 1]], c = uv[tris[t * 3 + 2]];
+                var center = (a + b + c) / 3f;
+                var off = new Vector2(Mathf.Floor(center.x), Mathf.Floor(center.y));
+                tv[t * 3] = a - off; tv[t * 3 + 1] = b - off; tv[t * 3 + 2] = c - off;
             }
+
+            // 1つの三角形にしか使われていない辺 = 島の外周
+            var edgeCount = new Dictionary<long, int>(nt * 3);
+            for (int t = 0; t < nt; t++)
+                for (int e = 0; e < 3; e++)
+                {
+                    long k = EdgeKey(tris[t * 3 + e], tris[t * 3 + (e + 1) % 3]);
+                    edgeCount.TryGetValue(k, out var c);
+                    edgeCount[k] = c + 1;
+                }
+
+            var verts = new List<Vector3>(nt * 3 + 256);
+            var src = new List<int>(nt * 3 + 256);
+            var skirt = new List<int>();
+            var body = new List<int>(nt * 3);
+            float pad = Mathf.Max(0f, padPx);
+            for (int t = 0; t < nt; t++)
+            {
+                int baseV = verts.Count;
+                for (int e = 0; e < 3; e++)
+                {
+                    var q = tv[t * 3 + e];
+                    verts.Add(new Vector3(q.x, q.y, 0f));
+                    src.Add(tris[t * 3 + e]);
+                    body.Add(baseV + e);
+                }
+                if (pad <= 0f) continue;
+                for (int e = 0; e < 3; e++)
+                {
+                    int ia = tris[t * 3 + e], ib = tris[t * 3 + (e + 1) % 3];
+                    if (edgeCount[EdgeKey(ia, ib)] != 1) continue;
+                    // ピクセル空間で、3つ目の頂点と反対側へ押し出す
+                    Vector2 A = Scale(tv[t * 3 + e], w, h), B = Scale(tv[t * 3 + (e + 1) % 3], w, h), C = Scale(tv[t * 3 + (e + 2) % 3], w, h);
+                    var ed = B - A;
+                    float len = ed.magnitude;
+                    if (len < 1e-6f) continue;
+                    ed /= len;
+                    var nrm = new Vector2(ed.y, -ed.x);
+                    if (Vector2.Dot(nrm, C - A) > 0f) nrm = -nrm;
+                    // 外側の辺は少し長くして、島の角のすき間も埋める
+                    var A2 = A + (nrm - ed * 0.5f) * pad;
+                    var B2 = B + (nrm + ed * 0.5f) * pad;
+                    int v0 = verts.Count;
+                    verts.Add(new Vector3(A.x / w, A.y / h, 0f)); src.Add(ia);
+                    verts.Add(new Vector3(B.x / w, B.y / h, 0f)); src.Add(ib);
+                    verts.Add(new Vector3(B2.x / w, B2.y / h, 0f)); src.Add(ib);
+                    verts.Add(new Vector3(A2.x / w, A2.y / h, 0f)); src.Add(ia);
+                    skirt.Add(v0); skirt.Add(v0 + 1); skirt.Add(v0 + 2);
+                    skirt.Add(v0); skirt.Add(v0 + 2); skirt.Add(v0 + 3);
+                }
+            }
+            // すそを先に描き、本体を後から上に描く (となりの島に少しかかっても本体が優先)
+            skirt.AddRange(body);
+            p.UvVerts = verts.ToArray();
+            p.UvTris = skirt.ToArray();
+            p.UvSrc = src.ToArray();
+            p.UvW = w; p.UvH = h;
+            p.UvCol1 = new Color32[p.UvVerts.Length];
+            p.UvCol2 = new Color32[p.UvVerts.Length];
+            for (int i = 0; i < p.UvCol1.Length; i++) { p.UvCol1[i] = new Color32(255, 255, 255, 0); p.UvCol2[i] = p.UvCol1[i]; }
+
+            DestroyUvMeshes(p);
+            p.UvMesh1 = MakeUvMesh(p, "ClothWrinkle_uv1");
+            p.UvMesh2 = MakeUvMesh(p, "ClothWrinkle_uv2");
+        }
+
+        private static Mesh MakeUvMesh(MeshPart p, string name)
+        {
+            var m = new Mesh { name = name, hideFlags = HideFlags.HideAndDontSave };
+            if (p.UvVerts.Length > 65000) m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            m.MarkDynamic();
+            m.vertices = p.UvVerts;
+            var tex = new Vector2[p.UvVerts.Length];
+            for (int i = 0; i < tex.Length; i++) tex[i] = new Vector2(p.UvVerts[i].x, p.UvVerts[i].y); // 模様は同じ位置から読む
+            m.uv = tex;
+            m.colors32 = p.UvCol1;
+            m.triangles = p.UvTris;
+            m.bounds = new Bounds(new Vector3(0.5f, 0.5f, 0f), new Vector3(4f, 4f, 1f));
+            return m;
+        }
+
+        public static void DestroyUvMeshes(MeshPart p)
+        {
+            if (p.UvMesh1 != null) UnityEngine.Object.Destroy(p.UvMesh1);
+            if (p.UvMesh2 != null) UnityEngine.Object.Destroy(p.UvMesh2);
+            p.UvMesh1 = null; p.UvMesh2 = null;
+        }
+
+        private static Vector2 Scale(Vector2 v, int w, int h) => new Vector2(v.x * w, v.y * h);
+
+        private static long EdgeKey(int a, int b) => a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+
+        /// <summary>2層目 (深い曲げ) の濃さ。1層目の濃さが 0.45 を超えたあたりから出始める。</summary>
+        public static byte DeepAlpha(byte a1)
+        {
+            float x = (a1 / 255f - 0.45f) / 0.55f;
+            return (byte)(WrinkleBaker.Smooth01(x) * 255f);
+        }
+
+        /// <summary>頂点ごとの濃さ (p.Colors) を UV メッシュの頂点色へ写す。</summary>
+        public static void FillUvColors(MeshPart p, bool deep, bool upload)
+        {
+            p.MaxA1 = 0; p.MaxA2 = 0;
+            if (p.UvVerts == null || p.Colors == null) return;
+            var c1 = p.UvCol1; var c2 = p.UvCol2; var srcIdx = p.UvSrc; var col = p.Colors;
+            int m1 = 0, m2 = 0;
+            for (int i = 0; i < srcIdx.Length; i++)
+            {
+                byte a = col[srcIdx[i]].a;
+                c1[i].a = a;
+                if (a > m1) m1 = a;
+                byte b = deep ? DeepAlpha(a) : (byte)0;
+                c2[i].a = b;
+                if (b > m2) m2 = b;
+            }
+            p.MaxA1 = m1; p.MaxA2 = m2;
+            if (!upload) return;
+            if (p.UvMesh1 != null) p.UvMesh1.colors32 = c1;
+            if (p.UvMesh2 != null && m2 > 0) p.UvMesh2.colors32 = c2;
+        }
+
+        // ---------------- GPU 合成 ----------------
+
+        private static readonly Dictionary<int, Material> _mats = new Dictionary<int, Material>();
+        private static int _meshPath = -1; // -1 = 未確認, 0 = GL の即時描画, 1 = メッシュ一括
+
+        /// <summary>UI/Default (頂点色アルファで混ぜる、Cull Off) を、書き込むチャンネル (ColorMask) ごとに用意。</summary>
+        private static Material Mat(int colorMask)
+        {
+            if (_mats.TryGetValue(colorMask, out var m) && m != null) return m;
+            var shader = Shader.Find("UI/Default");
+            if (shader == null) { WrinklePlugin.Log.LogError("UI/Default シェーダーが見つかりません"); return null; }
+            m = new Material(shader) { hideFlags = HideFlags.HideAndDontSave, name = "ClothWrinkle_blend" + colorMask };
+            m.SetFloat("_ColorMask", colorMask);
+            m.color = Color.white;
+            _mats[colorMask] = m;
+            return m;
+        }
+
+        /// <summary>ColorMask の値 (Unity の ColorWriteMask: R=8, G=4, B=2, A=1)。</summary>
+        public const int MaskRGB = 14, MaskGB = 6;
+
+        /// <summary>
+        /// メッシュ一括描画 (Graphics.DrawMeshNow) がこの環境で UV 空間に描けるかを、小さな画像で1回だけ確かめる。
+        /// 描けなければ GL の即時描画 (v0.3.1 から動作実績あり) を使う。
+        /// </summary>
+        public static bool UseMeshPath()
+        {
+            if (_meshPath >= 0) return _meshPath == 1;
+            _meshPath = 0;
+            if (!WrinklePlugin.MeshDraw.Value) { WrinklePlugin.FileLog("描画方法: GL の即時描画 (設定)"); return false; }
+            RenderTexture rt = null; Mesh m = null; Texture2D read = null;
+            var prev = RenderTexture.active;
+            try
+            {
+                var mat = Mat(MaskRGB);
+                if (mat == null) return false;
+                rt = RenderTexture.GetTemporary(8, 8, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+                Graphics.Blit(Texture2D.blackTexture, rt);
+                m = new Mesh { hideFlags = HideFlags.HideAndDontSave };
+                m.vertices = new[] { new Vector3(0f, 0f, 0f), new Vector3(1f, 0f, 0f), new Vector3(0f, 1f, 0f), new Vector3(1f, 1f, 0f) };
+                m.uv = new[] { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0f, 1f), new Vector2(1f, 1f) };
+                m.colors32 = new[] { new Color32(255, 255, 255, 255), new Color32(255, 255, 255, 255), new Color32(255, 255, 255, 255), new Color32(255, 255, 255, 255) };
+                m.triangles = new[] { 0, 2, 1, 1, 2, 3 };
+                RenderTexture.active = rt;
+                GL.PushMatrix();
+                GL.LoadOrtho();
+                mat.mainTexture = Texture2D.whiteTexture;
+                mat.SetPass(0);
+                Graphics.DrawMeshNow(m, Matrix4x4.identity);
+                GL.PopMatrix();
+                read = new Texture2D(8, 8, TextureFormat.RGBA32, false, true);
+                read.ReadPixels(new Rect(0, 0, 8, 8), 0, 0, false);
+                read.Apply();
+                var c = read.GetPixel(4, 4);
+                var c2 = read.GetPixel(1, 6);
+                _meshPath = c.r > 0.8f && c2.r > 0.8f ? 1 : 0;
+                WrinklePlugin.FileLog(_meshPath == 1 ? "描画方法: メッシュ一括 (確認OK)" : $"描画方法: GL の即時描画 (メッシュ一括の確認で色が変わらなかった: {c})");
+            }
+            catch (Exception e)
+            {
+                _meshPath = 0;
+                WrinklePlugin.FileLog("描画方法: GL の即時描画 (メッシュ一括の確認で例外: " + e.Message + ")");
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+                if (m != null) UnityEngine.Object.Destroy(m);
+                if (read != null) UnityEngine.Object.Destroy(read);
+            }
+            return _meshPath == 1;
+        }
+
+        /// <summary>
+        /// dst = base の上に、full1 を1層目の濃さ、full2 を2層目の濃さで重ねる (colorMask のチャンネルだけ)。
+        /// 返り値は描いた三角形の数 (GL のときは濃さ 0 の三角形は飛ばす)。
+        /// </summary>
+        public static int Draw(RenderTexture dst, Texture baseTex, Texture full1, Texture full2, List<MeshPart> parts, int colorMask)
+        {
+            var mat = Mat(colorMask);
+            if (mat == null) return 0;
+            bool mesh = UseMeshPath();
             Graphics.Blit(baseTex, dst);
 
             int drawn = 0;
@@ -315,30 +522,54 @@ namespace ClothWrinkle
             RenderTexture.active = dst;
             GL.PushMatrix();
             GL.LoadOrtho();
-            _mat.mainTexture = fullTex;
-            _mat.SetPass(0);
-            GL.Begin(GL.TRIANGLES);
-            foreach (var p in parts)
+            try
             {
-                var uv = p.Uv; var col = p.Colors; var tris = p.Tris;
-                if (uv == null || col == null || uv.Length != col.Length) continue;
-                for (int t = 0; t + 2 < tris.Length; t += 3)
+                for (int layer = 0; layer < 2; layer++)
                 {
-                    int ia = tris[t], ib = tris[t + 1], ic = tris[t + 2];
-                    if (col[ia].a == 0 && col[ib].a == 0 && col[ic].a == 0) continue;
-                    Vector2 a = uv[ia], b = uv[ib], c = uv[ic];
-                    var center = (a + b + c) / 3f;
-                    var off = new Vector2(Mathf.Floor(center.x), Mathf.Floor(center.y));
-                    a -= off; b -= off; c -= off;
-                    GL.Color(new Color(1f, 1f, 1f, col[ia].a / 255f)); GL.TexCoord2(a.x, a.y); GL.Vertex3(a.x, a.y, 0f);
-                    GL.Color(new Color(1f, 1f, 1f, col[ib].a / 255f)); GL.TexCoord2(b.x, b.y); GL.Vertex3(b.x, b.y, 0f);
-                    GL.Color(new Color(1f, 1f, 1f, col[ic].a / 255f)); GL.TexCoord2(c.x, c.y); GL.Vertex3(c.x, c.y, 0f);
-                    drawn++;
+                    var full = layer == 0 ? full1 : full2;
+                    if (full == null) continue;
+                    bool any = false;
+                    foreach (var p in parts) if ((layer == 0 ? p.MaxA1 : p.MaxA2) > 0) { any = true; break; }
+                    if (!any) continue;
+
+                    mat.mainTexture = full;
+                    mat.SetPass(0);
+                    if (mesh)
+                    {
+                        foreach (var p in parts)
+                        {
+                            var m = layer == 0 ? p.UvMesh1 : p.UvMesh2;
+                            if (m == null || (layer == 0 ? p.MaxA1 : p.MaxA2) == 0) continue;
+                            Graphics.DrawMeshNow(m, Matrix4x4.identity);
+                            drawn += p.UvTris.Length / 3;
+                        }
+                    }
+                    else
+                    {
+                        GL.Begin(GL.TRIANGLES);
+                        foreach (var p in parts)
+                        {
+                            if (p.UvVerts == null || (layer == 0 ? p.MaxA1 : p.MaxA2) == 0) continue;
+                            var v = p.UvVerts; var col = layer == 0 ? p.UvCol1 : p.UvCol2; var tris = p.UvTris;
+                            for (int t = 0; t + 2 < tris.Length; t += 3)
+                            {
+                                int ia = tris[t], ib = tris[t + 1], ic = tris[t + 2];
+                                if (col[ia].a == 0 && col[ib].a == 0 && col[ic].a == 0) continue;
+                                GL.Color(col[ia]); GL.TexCoord2(v[ia].x, v[ia].y); GL.Vertex(v[ia]);
+                                GL.Color(col[ib]); GL.TexCoord2(v[ib].x, v[ib].y); GL.Vertex(v[ib]);
+                                GL.Color(col[ic]); GL.TexCoord2(v[ic].x, v[ic].y); GL.Vertex(v[ic]);
+                                drawn++;
+                            }
+                        }
+                        GL.End();
+                    }
                 }
             }
-            GL.End();
-            GL.PopMatrix();
-            RenderTexture.active = prev;
+            finally
+            {
+                GL.PopMatrix();
+                RenderTexture.active = prev;
+            }
             return drawn;
         }
 
